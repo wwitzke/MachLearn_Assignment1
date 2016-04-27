@@ -21,3 +21,4 @@ vignettes/*.pdf
 # Default data file locations
 raw
 data
+index_cache

@@ -1,40 +1,824 @@
-# Exploratory Analysis of Weather Events with High Mortality and Economic Impact
+# Classifying Common Mistakes in Weight Lifting Motion Using Fitness Tracker Data
 Wayne Witzke  
 
-## Synopsis
-In this exploratory analysis, NOAA weather event data was processed and
-examined to determine which weather events were most likely to have the largest
-economic and health impact. Analysis focused on fatalities, injuries, and crop
-and property damage data obtained after 1996. It was determined that
-hurricanes, tsunamis, heat, and storm surge were the events with the highest
-impact.
-
-## Preliminaries
-
-#### Globals
-This analysis presumes that there is a specific directory structure in place.
-That structure is defined here.
 
 ```r
+# This analysis presumes that there is a specific directory structure in place.
+# That structure is defined here.
 knitr::opts_chunk$set( fig.path = "figure/" );
-rawdata.dir = "raw";
-tidydata.dir = "data";
-rawfile = file.path( rawdata.dir, "RawData" );
-tidyfile = file.path( tidydata.dir, "TidyData.rds" );
-library(data.table);
+raw.data.dir = "raw";
+raw.training.file = file.path( raw.data.dir, "RawTrainingData" );
+raw.test.file = file.path( raw.data.dir, "RawTestData" );
+suppressMessages(
+{
+    library(data.table);
+    library(caret);
+    library(randomForest);
+    library(doParallel);
+});
+set.seed(1869304218);
+cluster = makeCluster( detectCores() - 1 );
+registerDoParallel( cluster );
+```
+
+## Synopsis
+We explore the possibility of using personal fitness tracker data to classify
+errors in exercise performance. Existing data on weight lifting exercises was
+used to create several machine learning models, which were then tested against
+out-of-sample data to determine accuracy. A ensemble model approach was found
+to yield extremely good results.
+
+## Data Processing
+
+### Data collection and processing overview
+This analysis uses data from the Weight Lifting Exercise dataset created by
+Velloso, E et al. Training data from this dataset is programmatically
+downloaded from [this](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)
+location, and test data (also from this dataset) is programmatically downloaded
+from [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv).
+More information about this data and the group that collected it can be found
+[here](http://groupware.les.inf.puc-rio.br/har).
+
+
+```r
+if ( !dir.exists( raw.data.dir ) )
+{
+    dir.create( raw.data.dir, recursive = TRUE );
+}
+
+# This function will fetch a file from an online location, timestamp it, and
+# then return the timestamp. It only does this if the `output.file` doesn't
+# already exist. If it does, then it will merely return the timestamp for the
+# already saved raw data set.
+GetRawFile = function( url, output.file )
+{
+    timestamp = "";
+    timestamp.file = paste( output.file, "timestamp", sep = "." );
+
+    if ( !file.exists( output.file ) )
+    {
+        cat( paste( "Downloading", output.file, "\n" ) );
+        timestamp = date();
+        download.file(
+            url = url,
+            destfile = output.file
+        );
+        writeLines( timestamp, timestamp.file );
+    }
+    else
+    {
+        cat( paste( "Using existing", output.file, "\n" ) );
+        timestamp = readLines( timestamp.file );
+    }
+
+    suppressWarnings(
+        unzip( output.file, overwrite = FALSE, exdir = raw.data.dir )
+    );
+
+    return(timestamp);
+}
+
+cat(
+    "Raw training data downloaded on",
+    GetRawFile("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",
+    raw.training.file),
+    "\n"
+);
+cat(
+    "Raw test data downloaded on",
+    GetRawFile("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv",
+    raw.test.file),
+    "\n"
+);
 ```
 
 ```
-## data.table 1.9.6  For help type ?data.table or https://github.com/Rdatatable/data.table/wiki
+## Using existing raw/RawTrainingData 
+## Raw training data downloaded on Tue Apr 26 08:33:53 2016 
+## Using existing raw/RawTestData 
+## Raw test data downloaded on Tue Apr 26 08:33:57 2016
+```
+
+The data is comprised of a number of accelerometer and gyroscope measurements,
+time sequence information, some categorical values, and summary rows that
+divide the observations up into different collection windows. It describes the
+movements associated with a specific exercise repeatedly performed by test
+subjects in several different ways. Our outcome variable, `classe`, classifies
+how the exercises were pereformed, either correctly (`classe = A`), or
+incorrectly (`classe != A`), where the exercise was performed with one of four
+common mistakes. The full structure of the data can be seen in figure 1.
+
+#####Figure 1: Dataset structure
+
+```r
+# Dropping the first column of row labels.
+na.st = c("","NA");
+exercise.table =
+    fread(
+        raw.training.file,
+        na.strings = na.st,
+        drop = c(1),
+        showProgress = FALSE
+    );
+exercise.test =
+    fread(
+        raw.test.file,
+        na.strings = na.st,
+        drop = c(1),
+        showProgress = FALSE
+    );
+str(exercise.table, list.len = 1000000000);
 ```
 
 ```
-## The fastest way to learn (by data.table authors): https://www.datacamp.com/courses/data-analysis-the-data-table-way
+## Classes 'data.table' and 'data.frame':	19622 obs. of  159 variables:
+##  $ user_name               : chr  "carlitos" "carlitos" "carlitos" "carlitos" ...
+##  $ raw_timestamp_part_1    : int  1323084231 1323084231 1323084231 1323084232 1323084232 1323084232 1323084232 1323084232 1323084232 1323084232 ...
+##  $ raw_timestamp_part_2    : int  788290 808298 820366 120339 196328 304277 368296 440390 484323 484434 ...
+##  $ cvtd_timestamp          : chr  "05/12/2011 11:23" "05/12/2011 11:23" "05/12/2011 11:23" "05/12/2011 11:23" ...
+##  $ new_window              : chr  "no" "no" "no" "no" ...
+##  $ num_window              : int  11 11 11 12 12 12 12 12 12 12 ...
+##  $ roll_belt               : num  1.41 1.41 1.42 1.48 1.48 1.45 1.42 1.42 1.43 1.45 ...
+##  $ pitch_belt              : num  8.07 8.07 8.07 8.05 8.07 8.06 8.09 8.13 8.16 8.17 ...
+##  $ yaw_belt                : num  -94.4 -94.4 -94.4 -94.4 -94.4 -94.4 -94.4 -94.4 -94.4 -94.4 ...
+##  $ total_accel_belt        : int  3 3 3 3 3 3 3 3 3 3 ...
+##  $ kurtosis_roll_belt      : chr  NA NA NA NA ...
+##  $ kurtosis_picth_belt     : chr  NA NA NA NA ...
+##  $ kurtosis_yaw_belt       : chr  NA NA NA NA ...
+##  $ skewness_roll_belt      : chr  NA NA NA NA ...
+##  $ skewness_roll_belt.1    : chr  NA NA NA NA ...
+##  $ skewness_yaw_belt       : chr  NA NA NA NA ...
+##  $ max_roll_belt           : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ max_picth_belt          : int  NA NA NA NA NA NA NA NA NA NA ...
+##  $ max_yaw_belt            : chr  NA NA NA NA ...
+##  $ min_roll_belt           : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ min_pitch_belt          : int  NA NA NA NA NA NA NA NA NA NA ...
+##  $ min_yaw_belt            : chr  NA NA NA NA ...
+##  $ amplitude_roll_belt     : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ amplitude_pitch_belt    : int  NA NA NA NA NA NA NA NA NA NA ...
+##  $ amplitude_yaw_belt      : chr  NA NA NA NA ...
+##  $ var_total_accel_belt    : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ avg_roll_belt           : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ stddev_roll_belt        : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ var_roll_belt           : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ avg_pitch_belt          : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ stddev_pitch_belt       : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ var_pitch_belt          : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ avg_yaw_belt            : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ stddev_yaw_belt         : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ var_yaw_belt            : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ gyros_belt_x            : num  0 0.02 0 0.02 0.02 0.02 0.02 0.02 0.02 0.03 ...
+##  $ gyros_belt_y            : num  0 0 0 0 0.02 0 0 0 0 0 ...
+##  $ gyros_belt_z            : num  -0.02 -0.02 -0.02 -0.03 -0.02 -0.02 -0.02 -0.02 -0.02 0 ...
+##  $ accel_belt_x            : int  -21 -22 -20 -22 -21 -21 -22 -22 -20 -21 ...
+##  $ accel_belt_y            : int  4 4 5 3 2 4 3 4 2 4 ...
+##  $ accel_belt_z            : int  22 22 23 21 24 21 21 21 24 22 ...
+##  $ magnet_belt_x           : int  -3 -7 -2 -6 -6 0 -4 -2 1 -3 ...
+##  $ magnet_belt_y           : int  599 608 600 604 600 603 599 603 602 609 ...
+##  $ magnet_belt_z           : int  -313 -311 -305 -310 -302 -312 -311 -313 -312 -308 ...
+##  $ roll_arm                : num  -128 -128 -128 -128 -128 -128 -128 -128 -128 -128 ...
+##  $ pitch_arm               : num  22.5 22.5 22.5 22.1 22.1 22 21.9 21.8 21.7 21.6 ...
+##  $ yaw_arm                 : num  -161 -161 -161 -161 -161 -161 -161 -161 -161 -161 ...
+##  $ total_accel_arm         : int  34 34 34 34 34 34 34 34 34 34 ...
+##  $ var_accel_arm           : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ avg_roll_arm            : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ stddev_roll_arm         : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ var_roll_arm            : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ avg_pitch_arm           : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ stddev_pitch_arm        : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ var_pitch_arm           : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ avg_yaw_arm             : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ stddev_yaw_arm          : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ var_yaw_arm             : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ gyros_arm_x             : num  0 0.02 0.02 0.02 0 0.02 0 0.02 0.02 0.02 ...
+##  $ gyros_arm_y             : num  0 -0.02 -0.02 -0.03 -0.03 -0.03 -0.03 -0.02 -0.03 -0.03 ...
+##  $ gyros_arm_z             : num  -0.02 -0.02 -0.02 0.02 0 0 0 0 -0.02 -0.02 ...
+##  $ accel_arm_x             : int  -288 -290 -289 -289 -289 -289 -289 -289 -288 -288 ...
+##  $ accel_arm_y             : int  109 110 110 111 111 111 111 111 109 110 ...
+##  $ accel_arm_z             : int  -123 -125 -126 -123 -123 -122 -125 -124 -122 -124 ...
+##  $ magnet_arm_x            : int  -368 -369 -368 -372 -374 -369 -373 -372 -369 -376 ...
+##  $ magnet_arm_y            : int  337 337 344 344 337 342 336 338 341 334 ...
+##  $ magnet_arm_z            : int  516 513 513 512 506 513 509 510 518 516 ...
+##  $ kurtosis_roll_arm       : chr  NA NA NA NA ...
+##  $ kurtosis_picth_arm      : chr  NA NA NA NA ...
+##  $ kurtosis_yaw_arm        : chr  NA NA NA NA ...
+##  $ skewness_roll_arm       : chr  NA NA NA NA ...
+##  $ skewness_pitch_arm      : chr  NA NA NA NA ...
+##  $ skewness_yaw_arm        : chr  NA NA NA NA ...
+##  $ max_roll_arm            : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ max_picth_arm           : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ max_yaw_arm             : int  NA NA NA NA NA NA NA NA NA NA ...
+##  $ min_roll_arm            : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ min_pitch_arm           : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ min_yaw_arm             : int  NA NA NA NA NA NA NA NA NA NA ...
+##  $ amplitude_roll_arm      : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ amplitude_pitch_arm     : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ amplitude_yaw_arm       : int  NA NA NA NA NA NA NA NA NA NA ...
+##  $ roll_dumbbell           : num  13.1 13.1 12.9 13.4 13.4 ...
+##  $ pitch_dumbbell          : num  -70.5 -70.6 -70.3 -70.4 -70.4 ...
+##  $ yaw_dumbbell            : num  -84.9 -84.7 -85.1 -84.9 -84.9 ...
+##  $ kurtosis_roll_dumbbell  : chr  NA NA NA NA ...
+##  $ kurtosis_picth_dumbbell : chr  NA NA NA NA ...
+##  $ kurtosis_yaw_dumbbell   : chr  NA NA NA NA ...
+##  $ skewness_roll_dumbbell  : chr  NA NA NA NA ...
+##  $ skewness_pitch_dumbbell : chr  NA NA NA NA ...
+##  $ skewness_yaw_dumbbell   : chr  NA NA NA NA ...
+##  $ max_roll_dumbbell       : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ max_picth_dumbbell      : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ max_yaw_dumbbell        : chr  NA NA NA NA ...
+##  $ min_roll_dumbbell       : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ min_pitch_dumbbell      : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ min_yaw_dumbbell        : chr  NA NA NA NA ...
+##  $ amplitude_roll_dumbbell : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ amplitude_pitch_dumbbell: num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ amplitude_yaw_dumbbell  : chr  NA NA NA NA ...
+##  $ total_accel_dumbbell    : int  37 37 37 37 37 37 37 37 37 37 ...
+##  $ var_accel_dumbbell      : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ avg_roll_dumbbell       : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ stddev_roll_dumbbell    : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ var_roll_dumbbell       : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ avg_pitch_dumbbell      : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ stddev_pitch_dumbbell   : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ var_pitch_dumbbell      : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ avg_yaw_dumbbell        : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ stddev_yaw_dumbbell     : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ var_yaw_dumbbell        : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ gyros_dumbbell_x        : num  0 0 0 0 0 0 0 0 0 0 ...
+##  $ gyros_dumbbell_y        : num  -0.02 -0.02 -0.02 -0.02 -0.02 -0.02 -0.02 -0.02 -0.02 -0.02 ...
+##  $ gyros_dumbbell_z        : num  0 0 0 -0.02 0 0 0 0 0 0 ...
+##  $ accel_dumbbell_x        : int  -234 -233 -232 -232 -233 -234 -232 -234 -232 -235 ...
+##  $ accel_dumbbell_y        : int  47 47 46 48 48 48 47 46 47 48 ...
+##  $ accel_dumbbell_z        : int  -271 -269 -270 -269 -270 -269 -270 -272 -269 -270 ...
+##  $ magnet_dumbbell_x       : int  -559 -555 -561 -552 -554 -558 -551 -555 -549 -558 ...
+##  $ magnet_dumbbell_y       : int  293 296 298 303 292 294 295 300 292 291 ...
+##  $ magnet_dumbbell_z       : num  -65 -64 -63 -60 -68 -66 -70 -74 -65 -69 ...
+##  $ roll_forearm            : num  28.4 28.3 28.3 28.1 28 27.9 27.9 27.8 27.7 27.7 ...
+##  $ pitch_forearm           : num  -63.9 -63.9 -63.9 -63.9 -63.9 -63.9 -63.9 -63.8 -63.8 -63.8 ...
+##  $ yaw_forearm             : num  -153 -153 -152 -152 -152 -152 -152 -152 -152 -152 ...
+##  $ kurtosis_roll_forearm   : chr  NA NA NA NA ...
+##  $ kurtosis_picth_forearm  : chr  NA NA NA NA ...
+##  $ kurtosis_yaw_forearm    : chr  NA NA NA NA ...
+##  $ skewness_roll_forearm   : chr  NA NA NA NA ...
+##  $ skewness_pitch_forearm  : chr  NA NA NA NA ...
+##  $ skewness_yaw_forearm    : chr  NA NA NA NA ...
+##  $ max_roll_forearm        : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ max_picth_forearm       : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ max_yaw_forearm         : chr  NA NA NA NA ...
+##  $ min_roll_forearm        : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ min_pitch_forearm       : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ min_yaw_forearm         : chr  NA NA NA NA ...
+##  $ amplitude_roll_forearm  : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ amplitude_pitch_forearm : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ amplitude_yaw_forearm   : chr  NA NA NA NA ...
+##  $ total_accel_forearm     : int  36 36 36 36 36 36 36 36 36 36 ...
+##  $ var_accel_forearm       : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ avg_roll_forearm        : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ stddev_roll_forearm     : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ var_roll_forearm        : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ avg_pitch_forearm       : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ stddev_pitch_forearm    : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ var_pitch_forearm       : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ avg_yaw_forearm         : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ stddev_yaw_forearm      : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ var_yaw_forearm         : num  NA NA NA NA NA NA NA NA NA NA ...
+##  $ gyros_forearm_x         : num  0.03 0.02 0.03 0.02 0.02 0.02 0.02 0.02 0.03 0.02 ...
+##  $ gyros_forearm_y         : num  0 0 -0.02 -0.02 0 -0.02 0 -0.02 0 0 ...
+##  $ gyros_forearm_z         : num  -0.02 -0.02 0 0 -0.02 -0.03 -0.02 0 -0.02 -0.02 ...
+##  $ accel_forearm_x         : int  192 192 196 189 189 193 195 193 193 190 ...
+##  $ accel_forearm_y         : int  203 203 204 206 206 203 205 205 204 205 ...
+##  $ accel_forearm_z         : int  -215 -216 -213 -214 -214 -215 -215 -213 -214 -215 ...
+##  $ magnet_forearm_x        : int  -17 -18 -18 -16 -17 -9 -18 -9 -16 -22 ...
+##  $ magnet_forearm_y        : num  654 661 658 658 655 660 659 660 653 656 ...
+##  $ magnet_forearm_z        : num  476 473 469 469 473 478 470 474 476 473 ...
+##  $ classe                  : chr  "A" "A" "A" "A" ...
+##  - attr(*, ".internal.selfref")=<externalptr>
+```
+
+### Creating Data Slices
+Before we begin to tidy the data in this analysis, we segment the data into
+training and validation sets. Based on the structure of the data and the nature
+of the final test, and because we wish to perform multiple tests, the data will
+have a simple 80/20 slice, with 80% of the data used for training, and 20% used
+for validation. The selection of validation data is done using random sampling.
+The final test data was selected independent of this analysis.
+
+
+```r
+inTrain = createDataPartition( exercise.table$classe, p = 0.8, list = FALSE );
+exercise.train = exercise.table[inTrain, ];
+exercise.validate = exercise.table[-inTrain, ];
+```
+
+In addition to creating our own validation set, we will be doing
+10-fold-cross-validation as part of every model (hence the need for only 20%
+for the final validation step).
+
+
+```r
+#   This appears to do 10-fold cross validation by default, and allow parallel
+#   processing to boot. We do, however, appear to need to calculate a bunch of
+#   seeds for reproducability.
+seeds = vector( mode = "list", length = 11 ); # Apparently the length is
+                                              # number*repeat, which are 10 and
+                                              # 1 by default in trainControl.
+for( ii in 1:11 )
+{
+    seeds[[ii]] = sample.int(.Machine$integer.max, ncol(exercise.train)-1);
+}
+#   And apparently we want one value in each seed vector for each tuning
+#   parameters, which is just the number of variables in our data right now.
+fitControl = trainControl(method = "cv", seed = seeds);
+```
+
+### Tidying the data
+A cursory examination of this data shows a number of potential problems. For 
+instance, many of the variables have a large number of `NA` values. We remove
+any variables that have more than 80% of their values missing. 
+
+
+```r
+keep.cols =
+    which(
+        unlist(
+            exercise.train[ , lapply(.SD,function(x) sum(is.na(x)) < 0.2*.N)]
+        )
+    );
+exercise.train = exercise.train[ , keep.cols, with=FALSE];
+```
+
+This leaves no missing values in the training set.
+
+```r
+cat(
+    "There are",
+    sum(sapply(exercise.train, function(x) sum(is.na(x)))),
+    "NAs remaining.\n"
+);
+```
+
+```
+## There are 0 NAs remaining.
+```
+
+In addition, several variables were loaded as character data. One should be a
+date/time variable, while the others should be factor variables.
+
+
+```r
+exercise.train$cvtd_timestamp =
+    as.POSIXct(exercise.train$cvtd_timestamp, format="%d/%m/%Y %H:%M");
+exercise.train$user_name = factor(exercise.train$user_name);
+exercise.train$new_window = factor(exercise.train$new_window);
+exercise.train$classe = factor(exercise.train$classe);
+```
+
+## Model Creation
+Because our outcome variable is categorical, we use random forests, boosting,
+and linear discriminant analysis to find the best model for prediction. We also
+combine these predictors to create an aggregate model to compare against the
+individual models.
+
+
+```r
+model.RF =
+    suppressMessages(
+        train(
+            classe ~ .,
+            data = exercise.train,
+            method = "rf",
+            trControl = fitControl 
+        )
+    );
+pred.train.RF = predict(model.RF, exercise.train);
 ```
 
 ```r
-library(stringr);
+model.GBM = 
+    suppressMessages(
+        train(
+            classe ~ .,
+            data = exercise.train,
+            method = "gbm",
+            trControl = fitControl,
+            verbose = FALSE
+        )
+    );
+pred.train.GBM = predict(model.GBM, exercise.train);
 ```
+
+```r
+model.LDA = 
+    suppressMessages(
+        suppressWarnings(
+            train(
+                classe ~ .,
+                data = exercise.train,
+                method = "lda",
+                trControl = fitControl 
+            )
+        )
+    );
+pred.train.LDA = predict(model.LDA, exercise.train);
+```
+
+```r
+combined.predict =
+    data.frame(
+        p1 = pred.train.RF,
+        p2 = pred.train.GBM,
+        p3 = pred.train.LDA,
+        classe = exercise.train$classe
+    );
+
+model.combined = 
+    suppressMessages(
+        train(
+            classe ~ .,
+            data = combined.predict,
+            method = "gbm",
+            trControl = fitControl,
+            verbose = FALSE
+        )
+    );
+pred.train.combined = predict(model.combined, combined.predict);
+```
+
+```r
+#   We'll clean up here to avoid warning messages.
+stopCluster(cluster);
+```
+
+Figure 2 shows the in-sample accuracy of the various methods. Clearly, with
+100% in-sample accuracy, both random forest and the combined methods seem to
+produce the strongest results.
+
+#####Figure 2: Model fit in-sample accuracy
+
+```r
+cat("Random Forest model:\n");
+confusionMatrix(pred.train.RF, exercise.train$classe);
+cat("\nBoosted model:\n");
+confusionMatrix(pred.train.GBM, exercise.train$classe);
+cat("\nLinear Discriminant Analysis model:\n");
+confusionMatrix(pred.train.LDA, exercise.train$classe);
+cat("\nCombined model:\n");
+confusionMatrix(pred.train.combined, exercise.train$classe);
+```
+
+```
+## Random Forest model:
+## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction    A    B    C    D    E
+##          A 4464    0    0    0    0
+##          B    0 3038    0    0    0
+##          C    0    0 2738    0    0
+##          D    0    0    0 2573    0
+##          E    0    0    0    0 2886
+## 
+## Overall Statistics
+##                                      
+##                Accuracy : 1          
+##                  95% CI : (0.9998, 1)
+##     No Information Rate : 0.2843     
+##     P-Value [Acc > NIR] : < 2.2e-16  
+##                                      
+##                   Kappa : 1          
+##  Mcnemar's Test P-Value : NA         
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity            1.0000   1.0000   1.0000   1.0000   1.0000
+## Specificity            1.0000   1.0000   1.0000   1.0000   1.0000
+## Pos Pred Value         1.0000   1.0000   1.0000   1.0000   1.0000
+## Neg Pred Value         1.0000   1.0000   1.0000   1.0000   1.0000
+## Prevalence             0.2843   0.1935   0.1744   0.1639   0.1838
+## Detection Rate         0.2843   0.1935   0.1744   0.1639   0.1838
+## Detection Prevalence   0.2843   0.1935   0.1744   0.1639   0.1838
+## Balanced Accuracy      1.0000   1.0000   1.0000   1.0000   1.0000
+## 
+## Boosted model:
+## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction    A    B    C    D    E
+##          A 4464    2    0    0    0
+##          B    0 3033    1    0    0
+##          C    0    3 2731    3    0
+##          D    0    0    6 2567    3
+##          E    0    0    0    3 2883
+## 
+## Overall Statistics
+##                                          
+##                Accuracy : 0.9987         
+##                  95% CI : (0.998, 0.9992)
+##     No Information Rate : 0.2843         
+##     P-Value [Acc > NIR] : < 2.2e-16      
+##                                          
+##                   Kappa : 0.9983         
+##  Mcnemar's Test P-Value : NA             
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity            1.0000   0.9984   0.9974   0.9977   0.9990
+## Specificity            0.9998   0.9999   0.9995   0.9993   0.9998
+## Pos Pred Value         0.9996   0.9997   0.9978   0.9965   0.9990
+## Neg Pred Value         1.0000   0.9996   0.9995   0.9995   0.9998
+## Prevalence             0.2843   0.1935   0.1744   0.1639   0.1838
+## Detection Rate         0.2843   0.1932   0.1740   0.1635   0.1836
+## Detection Prevalence   0.2845   0.1933   0.1743   0.1641   0.1838
+## Balanced Accuracy      0.9999   0.9991   0.9985   0.9985   0.9994
+## 
+## Linear Discriminant Analysis model:
+## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction    A    B    C    D    E
+##          A 3823  420  244  152  109
+##          B  126 2024  245   95  335
+##          C  225  384 1915  304  173
+##          D  288  102  294 1983  247
+##          E    2  108   40   39 2022
+## 
+## Overall Statistics
+##                                           
+##                Accuracy : 0.7495          
+##                  95% CI : (0.7427, 0.7563)
+##     No Information Rate : 0.2843          
+##     P-Value [Acc > NIR] : < 2.2e-16       
+##                                           
+##                   Kappa : 0.6828          
+##  Mcnemar's Test P-Value : < 2.2e-16       
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity            0.8564   0.6662   0.6994   0.7707   0.7006
+## Specificity            0.9177   0.9367   0.9162   0.9291   0.9852
+## Pos Pred Value         0.8052   0.7165   0.6381   0.6805   0.9145
+## Neg Pred Value         0.9415   0.9212   0.9352   0.9539   0.9359
+## Prevalence             0.2843   0.1935   0.1744   0.1639   0.1838
+## Detection Rate         0.2435   0.1289   0.1220   0.1263   0.1288
+## Detection Prevalence   0.3024   0.1799   0.1912   0.1856   0.1408
+## Balanced Accuracy      0.8870   0.8015   0.8078   0.8499   0.8429
+## 
+## Combined model:
+## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction    A    B    C    D    E
+##          A 4464    0    0    0    0
+##          B    0 3038    0    0    0
+##          C    0    0 2738    0    0
+##          D    0    0    0 2573    0
+##          E    0    0    0    0 2886
+## 
+## Overall Statistics
+##                                      
+##                Accuracy : 1          
+##                  95% CI : (0.9998, 1)
+##     No Information Rate : 0.2843     
+##     P-Value [Acc > NIR] : < 2.2e-16  
+##                                      
+##                   Kappa : 1          
+##  Mcnemar's Test P-Value : NA         
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity            1.0000   1.0000   1.0000   1.0000   1.0000
+## Specificity            1.0000   1.0000   1.0000   1.0000   1.0000
+## Pos Pred Value         1.0000   1.0000   1.0000   1.0000   1.0000
+## Neg Pred Value         1.0000   1.0000   1.0000   1.0000   1.0000
+## Prevalence             0.2843   0.1935   0.1744   0.1639   0.1838
+## Detection Rate         0.2843   0.1935   0.1744   0.1639   0.1838
+## Detection Prevalence   0.2843   0.1935   0.1744   0.1639   0.1838
+## Balanced Accuracy      1.0000   1.0000   1.0000   1.0000   1.0000
+```
+
+## Model Validation and Selection
+In order to select the model that is most likely to fit external data, we
+now validate the models using the validation dataset captured earlier. Before
+we can do this, we have to prepare it in the same way the training data was
+prepared.
+
+
+```r
+exercise.validate = exercise.validate[ , keep.cols, with=FALSE];
+
+exercise.validate$cvtd_timestamp =
+    as.POSIXct(exercise.validate$cvtd_timestamp, format="%d/%m/%Y %H:%M");
+exercise.validate$user_name = factor(exercise.validate$user_name);
+exercise.validate$new_window = factor(exercise.validate$new_window);
+exercise.validate$classe = factor(exercise.validate$classe);
+```
+
+As can be seen in figure 3, once again both the random forest and combined
+models perform identically well, and better than the other two models. Since,
+theoretically, it should be a better predictor, the combined model will be used
+on the final test data.
+
+#####Figure 3: Estimated out of sample accuracy
+
+```r
+pred.validate.RF = predict(model.RF, exercise.validate);
+pred.validate.GBM = predict(model.GBM, exercise.validate);
+pred.validate.LDA = predict(model.LDA, exercise.validate);
+combined.validate.predict =
+    data.frame(
+        p1 = pred.validate.RF,
+        p2 = pred.validate.GBM,
+        p3 = pred.validate.LDA,
+        classe = exercise.validate$classe
+    );
+pred.validate.combined = predict(model.combined, combined.validate.predict);
+cat("Random Forest model:\n");
+confusionMatrix(pred.validate.RF, exercise.validate$classe);
+cat("\nBoosted model:\n");
+confusionMatrix(pred.validate.GBM, exercise.validate$classe);
+cat("\nLinear Discriminant Analysis model:\n");
+confusionMatrix(pred.validate.LDA, exercise.validate$classe);
+cat("\nCombined model:\n");
+confusionMatrix(pred.validate.combined, exercise.validate$classe);
+```
+
+```
+## Random Forest model:
+## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction    A    B    C    D    E
+##          A 1116    1    0    0    0
+##          B    0  757    1    0    0
+##          C    0    1  683    0    0
+##          D    0    0    0  643    1
+##          E    0    0    0    0  720
+## 
+## Overall Statistics
+##                                           
+##                Accuracy : 0.999           
+##                  95% CI : (0.9974, 0.9997)
+##     No Information Rate : 0.2845          
+##     P-Value [Acc > NIR] : < 2.2e-16       
+##                                           
+##                   Kappa : 0.9987          
+##  Mcnemar's Test P-Value : NA              
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity            1.0000   0.9974   0.9985   1.0000   0.9986
+## Specificity            0.9996   0.9997   0.9997   0.9997   1.0000
+## Pos Pred Value         0.9991   0.9987   0.9985   0.9984   1.0000
+## Neg Pred Value         1.0000   0.9994   0.9997   1.0000   0.9997
+## Prevalence             0.2845   0.1935   0.1744   0.1639   0.1838
+## Detection Rate         0.2845   0.1930   0.1741   0.1639   0.1835
+## Detection Prevalence   0.2847   0.1932   0.1744   0.1642   0.1835
+## Balanced Accuracy      0.9998   0.9985   0.9991   0.9998   0.9993
+## 
+## Boosted model:
+## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction    A    B    C    D    E
+##          A 1115    4    0    0    0
+##          B    1  752    1    0    0
+##          C    0    3  681    1    0
+##          D    0    0    2  639    3
+##          E    0    0    0    3  718
+## 
+## Overall Statistics
+##                                           
+##                Accuracy : 0.9954          
+##                  95% CI : (0.9928, 0.9973)
+##     No Information Rate : 0.2845          
+##     P-Value [Acc > NIR] : < 2.2e-16       
+##                                           
+##                   Kappa : 0.9942          
+##  Mcnemar's Test P-Value : NA              
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity            0.9991   0.9908   0.9956   0.9938   0.9958
+## Specificity            0.9986   0.9994   0.9988   0.9985   0.9991
+## Pos Pred Value         0.9964   0.9973   0.9942   0.9922   0.9958
+## Neg Pred Value         0.9996   0.9978   0.9991   0.9988   0.9991
+## Prevalence             0.2845   0.1935   0.1744   0.1639   0.1838
+## Detection Rate         0.2842   0.1917   0.1736   0.1629   0.1830
+## Detection Prevalence   0.2852   0.1922   0.1746   0.1642   0.1838
+## Balanced Accuracy      0.9988   0.9951   0.9972   0.9961   0.9975
+## 
+## Linear Discriminant Analysis model:
+## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction   A   B   C   D   E
+##          A 955 103  64  38  26
+##          B  26 504  65  27  68
+##          C  52  98 451  82  52
+##          D  82  22  95 484  54
+##          E   1  32   9  12 521
+## 
+## Overall Statistics
+##                                           
+##                Accuracy : 0.7431          
+##                  95% CI : (0.7291, 0.7567)
+##     No Information Rate : 0.2845          
+##     P-Value [Acc > NIR] : < 2.2e-16       
+##                                           
+##                   Kappa : 0.6746          
+##  Mcnemar's Test P-Value : < 2.2e-16       
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity            0.8557   0.6640   0.6594   0.7527   0.7226
+## Specificity            0.9177   0.9412   0.9123   0.9229   0.9831
+## Pos Pred Value         0.8052   0.7304   0.6136   0.6567   0.9061
+## Neg Pred Value         0.9412   0.9211   0.9269   0.9501   0.9403
+## Prevalence             0.2845   0.1935   0.1744   0.1639   0.1838
+## Detection Rate         0.2434   0.1285   0.1150   0.1234   0.1328
+## Detection Prevalence   0.3023   0.1759   0.1874   0.1879   0.1466
+## Balanced Accuracy      0.8867   0.8026   0.7858   0.8378   0.8529
+## 
+## Combined model:
+## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction    A    B    C    D    E
+##          A 1116    1    0    0    0
+##          B    0  757    1    0    0
+##          C    0    1  683    0    0
+##          D    0    0    0  643    1
+##          E    0    0    0    0  720
+## 
+## Overall Statistics
+##                                           
+##                Accuracy : 0.999           
+##                  95% CI : (0.9974, 0.9997)
+##     No Information Rate : 0.2845          
+##     P-Value [Acc > NIR] : < 2.2e-16       
+##                                           
+##                   Kappa : 0.9987          
+##  Mcnemar's Test P-Value : NA              
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity            1.0000   0.9974   0.9985   1.0000   0.9986
+## Specificity            0.9996   0.9997   0.9997   0.9997   1.0000
+## Pos Pred Value         0.9991   0.9987   0.9985   0.9984   1.0000
+## Neg Pred Value         1.0000   0.9994   0.9997   1.0000   0.9997
+## Prevalence             0.2845   0.1935   0.1744   0.1639   0.1838
+## Detection Rate         0.2845   0.1930   0.1741   0.1639   0.1835
+## Detection Prevalence   0.2847   0.1932   0.1744   0.1642   0.1835
+## Balanced Accuracy      0.9998   0.9985   0.9991   0.9998   0.9993
+```
+## Conclusions: Final Test Data Prediction and Model Evaluation
+Applying this model to the test set, we get the following predictions.
+
+
+```r
+exercise.test = exercise.test[ , keep.cols, with=FALSE];
+
+exercise.test$cvtd_timestamp =
+    as.POSIXct(exercise.test$cvtd_timestamp, format="%d/%m/%Y %H:%M");
+exercise.test$user_name = factor(exercise.test$user_name);
+exercise.test$new_window = factor(exercise.test$new_window);
+
+pred.test.RF = predict(model.RF, exercise.test);
+pred.test.GBM = predict(model.GBM, exercise.test);
+pred.test.LDA = predict(model.LDA, exercise.test);
+combined.test.predict =
+    data.frame(
+        p1 = pred.test.RF,
+        p2 = pred.test.GBM,
+        p3 = pred.test.LDA
+    );
+final.prediction = predict(model.combined, combined.test.predict);
+names(final.prediction) = 1:20;
+print(final.prediction);
+```
+
+```
+##  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 
+##  B  A  B  A  A  E  D  B  A  A  B  C  B  A  E  E  A  B  B  B 
+## Levels: A B C D E
+```
+
+This is apparently 100% correct.
+
+It is no surprise that we were able to get such highly accurate results. The
+test data apparently comes directly from the original dataset, which, as a time
+series, has highly correlated data windows in it. Likely if we were to apply
+these models to data generated outside of this initial study, we would not see
+such high performance in the model fit.
+
+## Appendix
 
 #### System Information
 This analysis was performed using the hardware and software listed in this
@@ -59,1304 +843,29 @@ sessionInfo();
 ## [11] LC_MEASUREMENT=en_US.UTF-8 LC_IDENTIFICATION=C       
 ## 
 ## attached base packages:
-## [1] stats     graphics  grDevices utils     datasets  methods   base     
+## [1] splines   parallel  stats     graphics  grDevices utils     datasets 
+## [8] methods   base     
 ## 
 ## other attached packages:
-## [1] stringr_1.0.0    data.table_1.9.6 rmarkdown_0.9.5 
+##  [1] mgcv_1.8-12         nlme_3.1-126        MASS_7.3-45        
+##  [4] plyr_1.8.3          gbm_2.1.1           survival_2.38-3    
+##  [7] doParallel_1.0.10   iterators_1.0.8     foreach_1.4.3      
+## [10] randomForest_4.6-12 caret_6.0-68        ggplot2_2.1.0      
+## [13] lattice_0.20-33     data.table_1.9.6    rmarkdown_0.9.5    
 ## 
 ## loaded via a namespace (and not attached):
-##  [1] magrittr_1.5    formatR_1.3     tools_3.2.5     htmltools_0.3.5
-##  [5] yaml_2.1.13     Rcpp_0.12.4     stringi_1.0-1   knitr_1.12.3   
-##  [9] digest_0.6.9    chron_2.3-47    evaluate_0.8.3
+##  [1] Rcpp_0.12.4        compiler_3.2.5     formatR_1.3       
+##  [4] nloptr_1.0.4       class_7.3-14       tools_3.2.5       
+##  [7] digest_0.6.9       lme4_1.1-11        evaluate_0.8.3    
+## [10] gtable_0.2.0       Matrix_1.2-4       yaml_2.1.13       
+## [13] SparseM_1.7        e1071_1.6-7        stringr_1.0.0     
+## [16] knitr_1.12.3       MatrixModels_0.4-1 stats4_3.2.5      
+## [19] grid_3.2.5         nnet_7.3-12        minqa_1.2.4       
+## [22] reshape2_1.4.1     car_2.1-2          magrittr_1.5      
+## [25] scales_0.4.0       codetools_0.2-14   htmltools_0.3.5   
+## [28] pbkrtest_0.4-6     colorspace_1.2-6   quantreg_5.21     
+## [31] stringi_1.0-1      munsell_0.4.3      chron_2.3-47
 ```
 
-## Data Processing
 
-#### Data collection and processing overview
-This analysis uses data from the NOAA storm database. This data is
-programmatically downloaded from [this](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2)
-location as part of the analysis. Information about this data set can be found
-at the National Weather Service [Storm Data Documentation](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf)
-and the National Climatic Data Center Storm Events [FAQ](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2FNCDC%20Storm%20Events-FAQ%20Page.pdf).
 
-Several parts of the data tidying process are packaged in whole or in part as
-reusable and are replicated here as functions.
-
-#### GetRawFile function
-This function will fetch a file from an online location, timestamp it, and then
-return the timestamp. It only does this if the `output.file` doesn't already
-exist. If it does, then it will merely return the timestamp for the already
-saved raw data set.
-
-This function will also create the raw data directory, if necessary.
-
-```r
-GetRawFile = function( url, output.file = rawfile )
-{
-    if ( !dir.exists( rawdata.dir ) )
-    {
-        dir.create( rawdata.dir, recursive = TRUE );
-    }
-
-    timestamp = "";
-    timestamp.file = paste( output.file, "timestamp", sep = "." );
-
-    if ( !file.exists( output.file ) )
-    {
-        message( "Downloading raw data." );
-        timestamp = date();
-        download.file(
-            url = url,
-            destfile = output.file
-        );
-        writeLines( timestamp, timestamp.file );
-    }
-    else
-    {
-        message( "Using existing raw data." );
-        timestamp = readLines( timestamp.file );
-    }
-
-    suppressWarnings(
-        unzip( output.file, overwrite = FALSE, exdir = rawdata.dir )
-    );
-
-    return(timestamp);
-}
-```
-
-We can use the GetRawFile function to reproducibly fetch the raw data file.
-In this case, this will FAIL to unzip the target file.
-
-```r
-cat(
-    "Raw data downloaded on",
-    GetRawFile("https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"),
-    "\n"
-);
-```
-
-```
-## Downloading raw data.
-```
-
-```
-## Raw data downloaded on Mon Apr 25 20:45:25 2016
-```
-
-#### Tidying the data
-Because of the size of this data set, here we conditionally tidy the data
-dependant upon whether a clean data file, `TidyData.rds`, already exists,
-indicating that the data processing routines in this analysis have already been
-run and the result of that processing has been saved for future use. If it
-does, then that file is used instead of the tidying operation. Note that the
-existence of the `TidyData.rds` file should have *no* impact on the analysis,
-except for shortening this data processing step. Also note that `TidyData.rds`
-will be produced as a result of the data processing steps in this analysis.
-
-
-```r
-weather.table = NA;
-dirtydata = TRUE;
-
-if ( file.exists( tidyfile ) )
-{
-    message( "Reading saved tidy data set." );
-    weather.table = readRDS( tidyfile );
-    str( weather.table );
-    dirtydata = FALSE;
-}
-```
-
-If there was no tidy data file, then the raw data must be processed to be used
-in the analysis. 
-
-The raw data is compressed using bzip2, which, unfortunately, cannot at this
-time be natively read by `fread`, the file reading component of `data.table`.
-The following code decompresses the file, but it is **not** generally portable.
-It requires that bunzip2 be installed, and may require that the system be
-unix-like. The alternative is to use R connections, but those will be much,
-much slower than the file reading mechanism provided by `fread`.
-
-Also, to avoid decompressing the data file every time, we first check to see
-if the uncompressed data file already exists.
-
-
-```r
-message( "Creating tidy data set." );
-```
-
-```
-## Creating tidy data set.
-```
-
-```r
-rawfile.decompressed = paste( rawfile, ".out", sep = "" );
-
-if ( !file.exists( rawfile.decompressed ) )
-{
-    system( paste( "bunzip2 -k", rawfile  ) );
-}
-```
-
-When we read in the data, only the beginning date for the event, event type,
-fatalities, injuries, property damage, property damage explanation, crop
-damage, and crop damage explanation are kept, as they will be the only
-variables contributing to the analysis.
-
-Note that reading the decompressed data will generate warnings. This appears to
-be due to certain columns containing multiline values. `fread` is capable of
-handling these multiline values, but the mechanism it uses for estimating the
-number of observations in the file does not appear to take these multiline
-values into account. This results in an inflated estimate that does not match
-the actual number of lines read.
-
-
-```r
-weather.table =
-    fread(
-        rawfile.decompressed,
-        select = c(
-            "BGN_DATE",
-            "EVTYPE",
-            "FATALITIES",
-            "INJURIES",
-            "PROPDMG",
-            "PROPDMGEXP",
-            "CROPDMG",
-            "CROPDMGEXP"
-        ),
-        na.strings = "",
-        showProgress = FALSE
-    );
-```
-
-```
-## Warning in fread(rawfile.decompressed, select = c("BGN_DATE", "EVTYPE", :
-## Read less rows (902297) than were allocated (967216). Run again with
-## verbose=TRUE and please report.
-```
-
-```r
-str(weather.table);
-```
-
-```
-## Classes 'data.table' and 'data.frame':	902297 obs. of  8 variables:
-##  $ BGN_DATE  : chr  "4/18/1950 0:00:00" "4/18/1950 0:00:00" "2/20/1951 0:00:00" "6/8/1951 0:00:00" ...
-##  $ EVTYPE    : chr  "TORNADO" "TORNADO" "TORNADO" "TORNADO" ...
-##  $ FATALITIES: num  0 0 0 0 0 0 0 0 1 0 ...
-##  $ INJURIES  : num  15 0 2 2 2 6 1 0 14 0 ...
-##  $ PROPDMG   : num  25 2.5 25 2.5 2.5 2.5 2.5 2.5 25 25 ...
-##  $ PROPDMGEXP: chr  "K" "K" "K" "K" ...
-##  $ CROPDMG   : num  0 0 0 0 0 0 0 0 0 0 ...
-##  $ CROPDMGEXP: chr  NA NA NA NA ...
-##  - attr(*, ".internal.selfref")=<externalptr>
-```
-
-As part of the data processing, we do some basic maintenance on the raw data
-that was just read.
-
-We change column names to lowercase (for ease of use), and we convert
-`bgn_date` to a Date variable.
-
-
-```r
-names( weather.table ) = tolower( names( weather.table ) );
-names( weather.table );
-```
-
-```
-## [1] "bgn_date"   "evtype"     "fatalities" "injuries"   "propdmg"   
-## [6] "propdmgexp" "cropdmg"    "cropdmgexp"
-```
-
-```r
-weather.table[ , bgn_date := as.Date(bgn_date, "%m/%d/%Y %H:%M:%S") ];
-```
-
-We also note, from the data documentation, that the only correct values for the
-`propdmgexp` and `cropdmgexp` columns are "K", "M", and "B", denoting
-"thousands", "millions" and "billions" of dollars, respectively. If we take a
-look at the actual values `propdmgexp` and `cropdmgexp`, though, we see that
-there are a large number of other values in observations for this variable,
-including lowercase "k" and "m".
-
-
-```r
-table( weather.table$propdmgexp );
-```
-
-```
-## 
-##      -      ?      +      0      1      2      3      4      5      6 
-##      1      8      5    216     25     13      4      4     28      4 
-##      7      8      B      h      H      K      m      M 
-##      5      1     40      1      6 424665      7  11330
-```
-
-```r
-table( weather.table$cropdmgexp );
-```
-
-```
-## 
-##      ?      0      2      B      k      K      m      M 
-##      7     19      1      9     21 281832      1   1994
-```
-
-The lowercase values appear to be simple coding errors that can be fixed. The
-other values, however, cannot be fixed by a simple coding change. Similarly,
-if the explanation for damage is `NA`, then the damage amounts become
-ambiguous. However, there are only 342 observations in this data set where
-there is a problematic damage explanation value *and* the damage is not equal
-to zero. Furthermore, these problematic values only occur in the years 1993,
-1994, and 1995.
-
-
-```r
-weirdpropl = (
-    !(weather.table$propdmgexp %in% c( "K","M","B","k","m","b" ))
-    & weather.table$propdmg != 0
-);
-
-weirdprop = which( weirdpropl );
-
-length(weirdprop);
-```
-
-```
-## [1] 327
-```
-
-```r
-table( weather.table[ weirdprop, propdmgexp ] );
-```
-
-```
-## 
-##   -   +   0   2   3   4   5   6   7   h   H 
-##   1   5 209   1   1   4  18   3   2   1   6
-```
-
-```r
-table( weather.table[ weirdprop, format(bgn_date, "%Y") ] );
-```
-
-```
-## 
-## 1993 1994 1995 
-##    7   32  288
-```
-
-```r
-weirdcropl = (
-    !(weather.table$cropdmgexp %in% c( "K","M","B","k","m","b" ))
-    & weather.table$cropdmg != 0
-);
-
-weirdcrop = which( weirdcropl );
-length(weirdcrop);
-```
-
-```
-## [1] 15
-```
-
-```r
-table( weather.table[ weirdcrop, cropdmgexp ] );
-```
-
-```
-## 
-##  0 
-## 12
-```
-
-```r
-table( weather.table[ weirdcrop, format(bgn_date, "%Y") ] );
-```
-
-```
-## 
-## 1994 1995 
-##   11    4
-```
-
-Because the number of problematic observations is much smaller than the total
-number of observations, and because they occur in years that are less relevant
-to later analytical results, we choose to exclude them. We also clean up the
-remaining values in those variables, and turn them into factors.
-
-
-```r
-weather.table[ , propdmgexp := toupper( propdmgexp ) ];
-weather.table[ , cropdmgexp := toupper( cropdmgexp ) ];
-
-notweirdl = !( weirdcropl | weirdpropl );
-
-weather.table = weather.table[ notweirdl, ];
-
-weather.table[
-    !( propdmgexp %in% c( "K","M","B" ) ),
-    propdmgexp := NA
-];
-weather.table[
-    !( cropdmgexp %in% c( "K","M","B" ) ),
-    cropdmgexp := NA
-];
-
-weather.table[ , propdmgexp := factor( propdmgexp ) ];
-weather.table[ , cropdmgexp := factor( cropdmgexp ) ];
-
-str(weather.table);
-```
-
-```
-## Classes 'data.table' and 'data.frame':	901955 obs. of  8 variables:
-##  $ bgn_date  : Date, format: "1950-04-18" "1950-04-18" ...
-##  $ evtype    : chr  "TORNADO" "TORNADO" "TORNADO" "TORNADO" ...
-##  $ fatalities: num  0 0 0 0 0 0 0 0 1 0 ...
-##  $ injuries  : num  15 0 2 2 2 6 1 0 14 0 ...
-##  $ propdmg   : num  25 2.5 25 2.5 2.5 2.5 2.5 2.5 25 25 ...
-##  $ propdmgexp: Factor w/ 3 levels "B","K","M": 2 2 2 2 2 2 2 2 2 2 ...
-##  $ cropdmg   : num  0 0 0 0 0 0 0 0 0 0 ...
-##  $ cropdmgexp: Factor w/ 3 levels "B","K","M": NA NA NA NA NA NA NA NA NA NA ...
-##  - attr(*, ".internal.selfref")=<externalptr> 
-##  - attr(*, "index")= int
-```
-
-We would also like to turn the event type variable into a factor.
-Unfortunately, there are many problems with this variable. For instance, there
-are over 900 different values in this column, but the data documentation only
-specifies 48 possible valid values for the even type. 
-
-
-```r
-length( levels( factor( weather.table$evtype ) ) );
-```
-
-```
-## [1] 982
-```
-
-There is some ambiguity in the documentation. "Hurricane/Typhoon" is also
-referenced as "Hurricane (Typhoon)", and "Marine Tstm Wind" is also referenced
-as "Marine Thunderstorm Wind". In addition, for all "Hail", "Wind" and
-"Tornado" events, the data documentation specifies that additional
-parenthetical values be included in the event type specifying details about
-those events. It is interesting to note that the rules regarding those
-parenthetical values are not followed for any observation in the NOAA data set.
-
-Before we do any more intensive cleanup, we should remove observations that
-contain no data, for example any row with with an event type containing the
-word "summary", which aggregates other discrete event types, or "rogue wave",
-which is an event that does not have a type and which, presumably, this
-database does not officially track. We also change the case of each event type
-to facilitate future processing here as well.
-
-
-```r
-weather.table[ , evtype := tolower( evtype ) ];
-
-#   Summaries appear to be completely impossible to use.
-weather.table = weather.table[ !str_detect( evtype, "summary" ), ];
-
-#   This one has no matching evtype code, even after examining the description
-#   of the observation to which it applies.
-weather.table = weather.table[ !str_detect( evtype, "marine accident" ), ];
-
-#   This one had reported large hail and strong winds, which alone might cause
-#   me to exclude it due to it being in two categories, but it also had no
-#   apparent fatalities, injuries, property or crop damage. It appears to be a
-#   bad entry.
-weather.table = weather.table[ !str_detect( evtype, "metro storm" ), ];
-
-#   Entries with the word "monthly" in them are summaries, and cannot be
-#   considered.
-weather.table = weather.table[ !str_detect( evtype, "monthly" ), ];
-
-#   Yet another summary entry that cannot be considered. Also, why record a
-#   lack of snow as an event?
-weather.table = weather.table[ !str_detect( evtype, "lack of snow" ), ];
-
-#   Why is this next one even in the database?
-weather.table = weather.table[ !str_detect( evtype, "no severe weather" ), ];
-
-#   What? Why?!?
-weather.table = weather.table[ evtype != "none", ];
-
-#   I can't even . . . >.<
-weather.table = weather.table[ !str_detect( evtype, "northern lights" ), ];
-
-#   The following "record" entries do not appear to match any valid event type.
-#   There may be a few that do, but the problem is that they might be
-#   duplicated by valid events, and there are too many to check each one
-#   individually in a reasonable amount of time. All "record" events have to
-#   go.
-weather.table = weather.table[ !str_detect( evtype, "record" ), ];
-
-#   These appear to be reporting the chance of wildfires, or wildfires that are
-#   already recorded by other observations.
-weather.table = weather.table[ !str_detect( evtype, "red flag" ), ];
-
-#   These have no matching valid event type.
-weather.table = weather.table[ !str_detect( evtype, "rogue wave" ), ];
-weather.table = weather.table[ !str_detect( evtype, "heavy seas" ), ];
-weather.table = weather.table[ !str_detect( evtype, "heavy swells" ), ];
-weather.table = weather.table[ !str_detect( evtype, "high\\s*swells" ), ];
-weather.table = weather.table[ !str_detect( evtype, "high seas" ), ];
-weather.table = weather.table[ !str_detect( evtype, "rough seas" ), ];
-weather.table = weather.table[ !str_detect( evtype, "severe turbulence" ), ];
-
-#   The word "unseasonable" is not specific enough to denote an actual event
-#   type, and there are too many such entries to check each one individually.
-weather.table = weather.table[ !str_detect( evtype, "unseason" ), ];
-
-#   Similarly, "unusual" elements are not specific enough, either.
-weather.table = weather.table[ !str_detect( evtype, "unusual" ), ];
-
-#   As appears to be the case with many of the adverbs and adjectives appearing
-#   in the event type column, "abnormal" observations appear to contain summary
-#   information that is not usable.
-weather.table = weather.table[ !str_detect( evtype, "abnormal" ), ];
-
-#   The various "accumulated" entries not only are not properly coded as event
-#   types, but they report damage in their remarks without having any damage
-#   specified in the proper variables.
-weather.table = weather.table[ !str_detect( evtype, "accumulate" ), ];
-
-#   No really information in the entry with this one.
-weather.table = weather.table[ !str_detect( evtype, "driest" ), ];
-
-#   The word pattern seems to indicate summary information as well.
-weather.table = weather.table[ !str_detect( evtype, "pattern" ), ];
-
-#   Same with "spell".
-weather.table = weather.table[ !str_detect( evtype, "spell" ), ];
-
-#   There are a few observations with the "other" even type. These end up being
-#   mixtures of dust devils, winds, and winter weather. It may be possible to
-#   recode these all individually, but it is not worth the time investment to
-#   do it for this exploratory analysis, so they have to go.
-weather.table = weather.table[ evtype !=  "other", ];
-
-#   This next one was coded incorrectly and no detail in the remarks to help.
-weather.table = weather.table[ !str_detect( evtype, "beach erosin" ), ];
-
-#   This next invalid event type descriptor denotes summaries, like most others
-#   do.
-weather.table = weather.table[ !str_detect( evtype, "normal" ), ];
-
-#   It is unfortunately impossible to determine if "dry" events are droughts
-#   from the information available. The website that is supposed to maintain
-#   those definitions is no longer available, and there isn't enough
-#   information in the remarks to make a determination anyway (probably).
-weather.table = weather.table[ ! (evtype %in% c( "dry", 
-                                                 "dry conditions",
-                                                 "dry weather",
-                                                 "dryness",
-                                                 "excessively dry",
-                                                 "very dry"
-                                               )
-                                 ),
-                             ];
-
-#   "Early rain" cannot be matched to a valid event type.
-weather.table = weather.table[ evtype != "early rain", ];
-
-#   "Excessive precipitation" also cannot be matched to a valid event type.
-weather.table = weather.table[ evtype != "excessive precipitation", ];
-
-#   "extremely wet" is a summary observation of no value to us.
-weather.table = weather.table[ evtype != "extremely wet", ];
-
-#   "flood watch" appears to be a summary event.
-weather.table = weather.table[ !str_detect( evtype, "flood watch" ), ];
-
-#   No idea what this is supposed to be.
-weather.table = weather.table[ !( evtype %in% c( "high",
-                                                 "large wall cloud",
-                                                 "wall cloud",
-                                                 "rotating wall cloud"
-                                               )
-                                ),
-                             ];
-
-
-#   More summary entries.
-weather.table = weather.table[ !( evtype %in% c( "wet month", "wet year" ) ) ];
-
-#   Get rid of the obvious one, finally.
-weather.table = weather.table[ evtype != "?" ];
-```
-
-We are not interested in the size of the hail or the strength of tornados and
-winds, and no digits appear in any of the valid entries for `evtype` in the
-data set, so we will first remove all digits and parentheticals, We also are
-not interested in most dashes, so we will remove them, and we can change all
-instances of blackslashes or double-backslashes to forward slashes.
-
-
-```r
-#   I really wish we had perl regular expression syntax here. Would simplify
-#   the horrible \\\\\\\\ (which matches \\ in the actual string) and \\\\.
-weather.table[ , evtype := str_replace_all( evtype, "\\\\\\\\|\\\\", "/" ) ];
-weather.table[ ,
-    evtype := str_replace_all(
-        evtype,
-        "\\(|[0-9.]+|\\)|/$|^/",
-        ""
-    )
-];
-weather.table[ , evtype := str_replace_all( evtype, "-|\\s+", " " ) ];
-```
-
-There are a number of simple text replacements that can be performed that
-should be safe. These arise from typos, inconsistent text formatting, and
-left-over characters from previous processing steps. Correcting these should
-have no negative impact on our results, and will provide additional
-observations that might otherwise be lost.
-
-
-```r
-weather.table[ , evtype := str_replace_all( evtype, "wildfires", "wildfire" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "wild fires", "wildfire" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "water spout", "waterspout" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "waterspouts", "waterspout" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "wayterspout", "waterspout" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "ashfall", "ash" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "ash plume", "ash" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "tornadoes", "tornado" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "tornadoe debris", "tornado" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "tornados", "tornado" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "torndao", "tornado" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "thuderstorm", "thunderstorm" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "thundeerstorm", "thunderstorm" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "thunderestorm", "thunderstorm" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "thunderstorms", "thunderstorm" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "thundertorm", "thunderstorm" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "thundertsorm", "thunderstorm" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "thundestorm", "thunderstorm" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "thunerstorm", "thunderstorm" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "tunderstorm", "thunderstorm" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "thunderstormwind", "thunderstorm wind" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "currents", "current" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "snowfall", "snow" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "lighting", "lightning" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "ligntning", "lightning" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "rainfall", "rain" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "rains", "rain" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "hvy", "heavy" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "torrential", "heavy" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "showers*", "rain" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "cstl", "coastal" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "devel", "devil" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "flashflood", "flash flood" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "flooding", "flood" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "floooding", "flood" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "floodin", "flood" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "flooodin", "flood" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "floods", "flood" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "clouds", "cloud" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "wnd", "wind" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "wins", "wind" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "w inds", "wind" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "w wind", " wind" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "winds", "wind" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "avalance", "avalanche" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "tstm", "thunderstorm" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "coastalflood", "coastal flood" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "duststorm", "dust storm" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "icestorm", "ice storm" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "funnel cloudss", "funnel clouds" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "hail\\s*storms*", "hail" ) ];
-weather.table[ , evtype := str_replace_all( evtype, " g$", "" ) ];
-weather.table[ , evtype := str_replace_all( evtype, " f$", "" ) ];
-weather.table[ , evtype := str_replace_all( evtype, " le cen$", "" ) ];
-weather.table[ , evtype := str_replace_all( evtype, " mph$", "" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "small hail", "hail" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "^typhoon$", "hurricane/typhoon" ) ];
-```
-
-These next replacements are, perhaps, slightly more dangerous, but should be
-relatively safe. These transformations involve removing or changing irrelevant
-information in the event type string to help match valid event type values.
-
-
-```r
-weather.table[ , evtype := str_replace_all( evtype, "thunderstormw", "thunderstorm wind" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "^hurricane.*", "hurricane/typhoon" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "^tropical storm.*", "tropical storm" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "locally|local", "" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "major|minor", "" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "/*\\s*trees", "" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "late season ", "" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "rural", "" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "agricultural ", "" ) ];
-weather.table[ , evtype := str_replace_all( evtype, "near record", "heavy" ) ];
-```
-
-Next, we do some safe cleanup to remove extra spaces, in preparation for the
-massive categorization to come.
-
-
-```r
-weather.table[ , evtype := str_replace_all( evtype, "\\s+", " " ) ];
-weather.table[ , evtype := str_replace_all( evtype, "^\\s+|\\s+$", "" ) ];
-```
-
-Finally, this next series uses the definitions provided in the data
-documentation to attempt to classify various remaining errant `evtype` values
-as a valid values.  Many of the event type values can be reclassified based on
-those guidlines, but occasionally interpretation beyond those guidelines is
-required. Any `evtype` values that could not possibly be classified have
-already been removed from the dataset. The categorization here is not perfect,
-but is reasonable for an exploratory study.
-
-
-```r
-weather.table[
-    evtype %in% c( "blow out tide", "blow out tides" ),
-    evtype := "astronomical low tide"
-];
-weather.table[
-    evtype == "heavy snow/blizzard/avalanche",
-    evtype := "avalanche"
-];
-weather.table[
-    evtype %in% c(
-        "blizzard and extreme wind chil", "blizzard and heavy snow",
-        "blizzard weather", "blizzard/freezing rain", "blizzard/heavy snow",
-        "blizzard/high wind", "blizzard/winter storm", "ground blizzard",
-        "heavy snow/blizzard", "high wind/ blizzard", "high wind/blizzard",
-        "high wind/blizzard/freezing ra", "high wind/wind chill/blizzard",
-        "ice storm/blizzard"
-    ),
-    evtype := "blizzard"
-];
-weather.table[
-    evtype %in% c(
-        "beach erosion/coastal flood", "beach flood", "coastal flood/erosion",
-        "coastal/tidal flood", "erosion/coastal flood",
-        "heavy surf coastal flood", "high wind/coastal flood"
-    ),
-    evtype := "coastal flood"
-];
-weather.table[
-    evtype %in% c(
-        "cold", "cold temperature", "cold temperatures", "cold wave",
-        "cold weather", "cold wind chill temperatures", "cold/wind",
-        "excessive cold", "extended cold", "fog and cold temperatures",
-        "high wind and wind chill", "high wind/cold",
-        "high wind/lo wind chill", "high wind/wind chill",
-        "hyperthermia/exposure", "hypothermia", "hypothermia/exposure",
-        "lo wind chill", "low temperature", "prolong cold", "wind chill",
-        "wind chill/high wind"
-    ),
-    evtype := "cold/wind chill"
-];
-weather.table[
-    evtype %in% c(
-        "landslide", "landslide/urban flood", "landslides", "landslump",
-        "mud slide", "mud slides", "mud slides urban flood", "mud/rock slide",
-        "mudslide", "mudslide/landslide", "mudslides", "rock slide",
-        "urban flood landslide"
-    ),
-    evtype := "debris flow"
-];
-weather.table[
-    evtype %in% c( "fog", "patchy dense fog" ),
-    evtype := "dense fog"
-];
-weather.table[
-    evtype == "smoke",
-    evtype := "dense smoke"
-];
-weather.table[
-    evtype %in% c(
-        "drought/excessive heat", "excessive", "excessive heat/drought",
-        "heat drought", "heat wave drought", "heat/drought", "snow drought"
-    ),
-    evtype := "drought"
-];
-weather.table[
-    evtype %in% c(
-        "blowing dust", "dust storm/high wind", "high wind dust storm",
-        "saharan dust"
-    ),
-    evtype := "dust storm"
-];
-weather.table[
-    evtype == "extreme heat",
-    evtype := "excessive heat"
-];
-weather.table[
-    evtype %in% c(
-        "bitter wind chill", "bitter wind chill temperatures", "extreme cold",
-        "extreme wind chill", "extreme wind chills", "extreme windchill",
-        "extreme windchill temperatures", "severe cold"
-    ),
-    evtype := "extreme cold/wind chill"
-];
-weather.table[
-    evtype %in% c(
-        "flash flood from ice jams", "flash flood heavy rain",
-        "flash flood landslides", "flash flood/ flood", "flash flood/ street",
-        "flash flood/flood", "flash flood/heavy rain", "flash flood/landslide",
-        "flash flood/thunderstorm wi", "flood flash", "flood flood/flash",
-        "flood/flash", "flood/flash flood", "flood/flash/flood",
-        "rapidly rising water", "thunderstorm wind/flash flood"
-    ),
-    evtype := "flash flood"
-];
-weather.table[
-    evtype %in% c(
-        "flood & heavy rain", "flood/rain/wind", "flood/river flood",
-        "flood/strong wind", "hail flood", "heavy rain and flood",
-        "heavy rain/flood", "heavy rain/mudslides/flood",
-        "heavy snow/high wind & flood", "high wind/flood", "ice jam flood",
-        "river and stream flood", "river flood", "snowmelt flood",
-        "thunderstorm wind/ flood", "thunderstorm wind/flood"
-    ),
-    evtype := "flood"
-];
-weather.table[
-    evtype == "ice fog",
-    evtype := "freezing fog"
-];
-weather.table[
-    evtype %in% c(
-        "cold and frost", "damaging freeze", "early freeze", "early frost",
-        "first frost", "freeze", "frost", "hard freeze", "late freeze"
-    ),
-    evtype := "frost/freeze"
-];
-weather.table[
-    evtype %in% c(
-        "cold air funnel", "cold air funnels", "funnel", "funnels",
-        "thunderstorm wind funnel clou", "thunderstorm wind/funnel clou",
-        "wall cloud/funnel cloud"
-    ),
-    evtype := "funnel cloud"
-];
-weather.table[
-    evtype %in% c(
-        "deep hail", "funnel cloud/hail", "gusty wind/hail", "hail aloft",
-        "hail damage", "hail/wind", "non severe hail", "thunderstorm hail",
-        "thunderstorm wind hail", "thunderstorm wind/ hail",
-        "thunderstorm wind/hail", "thunderstorm windhail", "wind/hail"
-    ),
-    evtype := "hail"
-];
-weather.table[
-    evtype %in% c(
-        "dry hot weather", "heat wave", "heat waves", "hot and dry",
-        "hot weather", "prolong warmth", "very warm", "warm dry conditions",
-        "warm weather"
-    ),
-    evtype := "heat"
-];
-weather.table[
-    evtype %in% c(
-        "coastal storm", "coastalstorm", "cold and wet conditions",
-        "cool and wet", "dam break", "dam failure", "drowning",
-        "excessive rain", "excessive wetness", "gusty wind/heavy rain",
-        "heavy precipatation", "heavy precipitation", "heavy rain and wind",
-        "heavy rain effects", "heavy rain; urban flood wind;",
-        "heavy rain/lightning", "heavy rain/severe weather",
-        "heavy rain/small stream urban", "heavy rain/urban flood",
-        "heavy rain/wind", "high wind heavy rain", "high wind/heavy rain",
-        "highway flood", "lightning and heavy rain", "lightning/heavy rain",
-        "prolonged rain", "rain", "rain and wind", "rain damage", "rain heavy",
-        "rain/wind", "raintorm", "small stream", "small stream and",
-        "small stream and urban flood", "small stream flood",
-        "small stream urban flood", "small stream/urban flood",
-        "sml stream fld", "stream flood", "street flood",
-        "thunderstorm heavy rain", "thunderstorm wind heavy rain",
-        "thunderstorm wind small strea", "thunderstorm wind urban flood",
-        "thunderstorm wind/heavy rain", "urban and small",
-        "urban and small stream", "urban and small stream flood",
-        "urban flood", "urban small", "urban small stream flood",
-        "urban/small", "urban/small flood", "urban/small stream",
-        "urban/small stream flood", "urban/small strm fldg",
-        "urban/sml stream fld", "urban/sml stream fldg", "urban/street flood",
-        "wet weather"
-    ),
-    evtype := "heavy rain"
-];
-weather.table[
-    evtype %in% c(
-        "excessive snow", "falling snow/ice", "heavy snow and",
-        "heavy snow and high wind", "heavy snow and strong wind",
-        "heavy snow squalls", "heavy snow/high", "heavy snow/high wind",
-        "heavy snow/squalls", "heavy snow/wind", "heavy snowpack",
-        "heavy wet snow", "high wind and heavy snow", "high wind/heavy snow",
-        "snow accumulation", "snow and heavy snow", "snow/heavy snow"
-    ),
-    evtype := "heavy snow"
-];
-weather.table[
-    evtype %in% c(
-        "astronomical high tide", "beach erosion", "hazardous surf",
-        "heavy rain/high surf", "heavy surf", "heavy surf and wind",
-        "heavy surf/high surf", "high surf advisories", "high surf advisory",
-        "high tides", "high water", "high waves", "high wind and high tides",
-        "rip current heavy surf", "rip current/heavy surf", "rough surf",
-        "wind and wave"
-    ),
-    evtype := "high surf"
-];
-weather.table[
-    evtype %in% c(
-        "gradient wind", "high wind damage", "high wind/seas",
-        "non thunderstorm wind", "storm force wind"
-    ),
-    evtype := "high wind"
-];
-weather.table[
-    evtype == "remnants of floyd",
-    evtype := "hurricane/typhoon"
-];
-weather.table[
-    evtype %in% c(
-        "glaze/ice storm", "heavy snow/ice storm", "ice storm and snow",
-        "ice storm/flash flood", "snow and ice storm", "snow/ice storm"
-    ),
-    evtype := "ice storm"
-];
-weather.table[
-    evtype %in% c(
-        "heavy lake snow", "lake effect snow", "thundersnow",
-        "thundersnow rain"
-    ),
-    evtype := "lake-effect snow"
-];
-weather.table[
-    evtype == "lake flood",
-    evtype := "lakeshore flood"
-];
-weather.table[
-    evtype %in% c(
-        "lightning damage", "lightning fire", "lightning injury",
-        "lightning wauseon"
-    ),
-    evtype := "lightning"
-];
-weather.table[
-    evtype == "high wind and seas",
-    evtype := "marine high wind"
-];
-weather.table[
-    evtype == "gusty lake wind",
-    evtype := "marine strong wind"
-];
-weather.table[
-    evtype == "marine mishap",
-    evtype := "marine strong wind"
-];
-weather.table[
-    evtype == "sleet storm",
-    evtype := "sleet"
-];
-weather.table[
-    evtype %in% c(
-        "coastal erosion", "coastal surge", "storm surge", "tidal flood"
-    ),
-    evtype := "storm surge/tide"
-];
-weather.table[
-    evtype %in% c(
-        "gusty wind", "gusty wind/rain", "non severe wind damage", "southeast",
-        "strong wind gust", "wake lo wind", "wind", "wind advisory",
-        "wind damage", "wind gusts", "wind storm"
-    ),
-    evtype := "strong wind"
-];
-weather.table[
-    evtype %in% c(
-        "apache county", "downburst", "downburst wind", "dry microburst",
-        "dry microburst wind", "dry mircoburst wind", "gustnado",
-        "gustnado and", "gusty thunderstorm wind", "heatburst",
-        "lightning and thunderstorm win", "lightning and wind",
-        "lightning thunderstorm wind", "lightning thunderstorm winds",
-        "microburst", "microburst wind", "severe thunderstorm",
-        "severe thunderstorm wind", "thunderstorm", "thunderstorm damage",
-        "thunderstorm damage to", "thunderstorm wind and",
-        "thunderstorm wind and lightning", "thunderstorm wind damage",
-        "thunderstorm wind lightning", "thunderstorm wind/ tree",
-        "thunderstorm wind/awning", "thunderstorm wind/lightning",
-        "thunderstorm winds", "thunderstrom wind", "wet micoburst",
-        "wet microburst"
-    ),
-    evtype := "thunderstorm wind"
-];
-weather.table[
-    evtype %in% c(
-        "cold air tornado", "landspout", "tornado debris",
-        "tornado, thunderstorm wind, hail", "whirlwind"
-    ),
-    evtype := "tornado"
-];
-weather.table[
-    evtype %in% c( "vog", "volcanic eruption" ),
-    evtype := "volcanic ash"
-];
-weather.table[
-    evtype %in% c(
-        "dust devil waterspout", "tornado/waterspout",
-        "waterspout funnel cloud", "waterspout tornado", "waterspout/ tornado",
-        "waterspout/tornado"
-    ),
-    evtype := "waterspout"
-];
-weather.table[
-    evtype %in% c(
-        "brush fire", "brush fires", "forest fires", "grass fires",
-        "wild/forest fire", "wild/forest fires"
-    ),
-    evtype := "wildfire"
-];
-weather.table[
-    evtype %in% c(
-        "freezing rain and sleet", "freezing rain and snow",
-        "freezing rain sleet and", "freezing rain sleet and light",
-        "freezing rain/sleet", "freezing rain/snow", "hail/icy roads",
-        "heavy mix", "heavy snow & ice", "heavy snow and ice",
-        "heavy snow and ice storm", "heavy snow andblowing snow",
-        "heavy snow freezing rain", "heavy snow/blowing snow",
-        "heavy snow/freezing rain", "heavy snow/high wind/freezing",
-        "heavy snow/ice", "heavy snow/sleet", "heavy snow/winter storm",
-        "ice and snow", "ice floes", "ice/snow", "light snow and sleet",
-        "light snow/freezing precip", "mixed precip", "mixed precipitation",
-        "sleet & freezing rain", "sleet/freezing rain", "sleet/ice storm",
-        "sleet/rain/snow", "sleet/snow", "snow and ice", "snow and sleet",
-        "snow freezing rain", "snow sleet", "snow/ ice", "snow/freezing rain",
-        "snow/ice", "snow/rain/sleet", "snow/sleet",
-        "snow/sleet/freezing rain", "snow/sleet/rain", "winter mix",
-        "winter storm high wind", "winter storm/high wind", "winter storms",
-        "winter weather mix", "winter weather/mix", "wintery mix", "wintry mix"
-    ),
-    evtype := "winter storm"
-];
-weather.table[
-    evtype %in% c(
-        "black ice", "blowing snow", "blowing snow & extreme wind ch",
-        "blowing snow extreme wind chi", "blowing snow/extreme wind chil",
-        "cold and snow", "drifting snow", "early snow",
-        "extreme wind chill/blowing sno", "first snow", "freezing drizzle",
-        "freezing drizzle and freezing", "freezing rain", "freezing spray",
-        "glaze", "glaze ice", "heavy rain/snow", "heavy snow rain",
-        "high wind/snow", "ice", "ice jam", "ice on road", "ice pellets",
-        "ice roads", "ice/strong wind", "icy roads", "late snow",
-        "light freezing rain", "light snow", "light snow/flurries",
-        "moderate snow", "mountain snows", "patchy ice", "prolong cold/snow",
-        "rain/snow", "seasonal snow", "snow", "snow advisory", "snow and cold",
-        "snow and wind", "snow high wind wind chill", "snow rain",
-        "snow squall", "snow squalls", "snow/ bitter cold",
-        "snow/blowing snow", "snow/cold", "snow/high wind", "snow/rain",
-        "snowstorm", "wet snow"
-    ),
-    evtype := "winter weather"
-];
-
-valid.evtype = c(
-    "Astronomical Low Tide", "Avalanche", "Blizzard",
-    "Coastal Flood", "Cold/Wind Chill", "Debris Flow",
-    "Dense Fog", "Dense Smoke", "Drought",
-    "Dust Devil", "Dust Storm", "Excessive Heat",
-    "Extreme Cold/Wind Chill", "Flash Flood", "Flood",
-    "Frost/Freeze", "Funnel Cloud", "Freezing Fog",
-    "Hail", "Heat", "Heavy Rain",
-    "Heavy Snow", "High Surf", "High Wind",
-    "Hurricane/Typhoon", "Ice Storm", "Lake-Effect Snow",
-    "Lakeshore Flood", "Lightning", "Marine Hail",
-    "Marine High Wind", "Marine Strong Wind", "Marine Thunderstorm Wind",
-    "Rip Current", "Seiche", "Sleet",
-    "Storm Surge/Tide", "Strong Wind", "Thunderstorm Wind",
-    "Tornado", "Tropical Depression", "Tropical Storm",
-    "Tsunami", "Volcanic Ash", "Waterspout",
-    "Wildfire", "Winter Storm", "Winter Weather"
-);
-
-weather.table = weather.table[ evtype %in% tolower(valid.evtype), ];
-weather.table$evtype = factor( weather.table$evtype );
-
-#   This is from the ?tolower help information:
-proper = function(ss)
-{
-    cap =
-        function(st) paste(
-            toupper( substring( st, 1, 1 ) ),
-            tolower( substring( st, 2 ) ),
-            sep = "",
-            collapse = " "
-        );
-
-    sapply(
-        strsplit( ss, split = " " ),
-        cap,
-        USE.NAMES = !is.null( names( ss ) )
-    );
-}
-
-#   Capitalization for nice summarization later.
-levels( weather.table$evtype ) =
-    proper( levels( weather.table$evtype ) );
-```
-
-Now we check for `NA` values. Generally, `NA` values will prevent an
-observation from contributing to the analysis. `NA` values in `propdmgexp` and
-`cropdmgexp` are valid only if the accompanying `propdmg` and `cropdmg` are 0.
-We remove any observations that do not conform.
-
-
-```r
-weather.table = weather.table[ 
-    !is.na(bgn_date) &
-    !is.na(evtype) &
-    !is.na(fatalities) &
-    !is.na(injuries) &
-    !is.na(propdmg) &
-    !is.na(cropdmg) &
-    !(is.na(propdmgexp) & propdmg != 0) &
-    !(is.na(cropdmgexp) & cropdmg != 0),
-];
-```
-
-Since `propdmg` and `propdmgexp` do not actually represent different variables,
-but rather a single variable spread across two columns, we combine them back
-into a single numerical value of the proper magnitude and store that back in
-`propdmg`, dropping `propdmgexp` from the data set.  We do the same for
-`cropdmg` and `cropdmgexp`. Finally, since we are only interested in overall
-economic impact, we combine `cropdmg` and `propdmg` into a single new variable,
-`totaldmg`, and drop `cropdmg` and `propdmg` from the data set.
-
-```r
-weather.table[
-    !is.na(propdmgexp),
-    propdmg :=
-        ifelse(
-            propdmgexp == 'K',
-            propdmg * 1000,
-            ifelse(
-                propdmgexp == 'M',
-                propdmg * 1000000,
-                propdmg * 1000000000
-            )
-        )
-];
-weather.table[ , propdmgexp := NULL ];
-
-weather.table[
-    !is.na(cropdmgexp),
-    cropdmg :=
-        ifelse(
-            cropdmgexp == 'K',
-            cropdmg * 1000,
-            ifelse(
-                cropdmgexp == 'M',
-                cropdmg * 1000000,
-                cropdmg * 1000000000
-            )
-        )
-];
-
-weather.table[ , cropdmgexp := NULL ];
-
-weather.table[ , totaldmg := propdmg + cropdmg ];
-weather.table[ , cropdmg := NULL ];
-weather.table[ , propdmg := NULL ];
-
-str( weather.table );
-```
-
-```
-## Classes 'data.table' and 'data.frame':	900917 obs. of  5 variables:
-##  $ bgn_date  : Date, format: "1950-04-18" "1950-04-18" ...
-##  $ evtype    : Factor w/ 48 levels "Astronomical Low Tide",..: 40 40 40 40 40 40 40 40 40 40 ...
-##  $ fatalities: num  0 0 0 0 0 0 0 0 1 0 ...
-##  $ injuries  : num  15 0 2 2 2 6 1 0 14 0 ...
-##  $ totaldmg  : num  25000 2500 25000 2500 2500 2500 2500 2500 25000 25000 ...
-##  - attr(*, ".internal.selfref")=<externalptr>
-```
-
-```r
-if ( !dir.exists( tidydata.dir ) )
-{
-    dir.create( tidydata.dir, recursive = TRUE );
-}
-saveRDS( weather.table, tidyfile );
-```
-
-## Results
-
-The present impact of weather events on the economy and individual health
-depends largely on the fatilities, injuries, and damage done by those events.
-From the data provided by the NOAA, we can study this information to get an
-idea of which events are most damaging.  However, due to advances in
-technology (such as the advent of early warning systems), changes in culture
-(such as education), changes in the environment (such as global warming), and
-changes in data collection techniques, not all data provided by NOAA will be
-relevant to a measure of the current impact of weather events.
-
-The following figure shows total yearly fatalities, injuries, and property
-damage for each weather event. While specific details about individual weather
-events cannot be determined from this graph, it is clear that there is
-significant variation in the collected data over time.
-
-
-```r
-library(lubridate);
-```
-
-```
-## 
-## Attaching package: 'lubridate'
-```
-
-```
-## The following objects are masked from 'package:data.table':
-## 
-##     hour, mday, month, quarter, wday, week, yday, year
-```
-
-```
-## The following object is masked from 'package:base':
-## 
-##     date
-```
-
-```r
-library(ggplot2);
-weather.impact.by.year =
-    weather.table[ , year := year(bgn_date) ];
-
-weather.impact.by.year =
-    weather.impact.by.year[ ,
-        list(
-            fatalities = sum(fatalities),
-            injuries = sum(injuries),
-            totaldmg = sum(totaldmg)
-        ),
-        by="year,evtype"
-    ];
-
-weather.impact.by.year =
-    melt(
-         weather.impact.by.year,
-         c( "year", "evtype" ),
-         variable.name = "impact"
-    );
-
-wiby =
-    ggplot( weather.impact.by.year, aes( year, value ) ) +
-    geom_line( aes( col = evtype ) ) +
-    facet_grid( impact ~ ., scales = "free_y" ) +
-    theme( legend.position = "bottom" ) +
-    xlab( "Year" ) +
-    ylab( "" ) +
-    ggtitle( "Summary of Total Weather Impact Over Time" ) +
-    scale_x_continuous(
-        breaks =
-            round(
-                seq(
-                    min(weather.impact.by.year$year),
-                    max(weather.impact.by.year$year),
-                    by = 5 
-                ),
-                0
-            )
-    ) +
-    scale_color_discrete( name = "Event Title" );
-
-print(wiby);
-```
-
-![](figure/weather_impact_by_year-1.png)
-
-The plot shows that data collected earlier than 1993 is, at best, incomplete.
-In addition, the drop in fatalities for the data that does exist prior to 1993
-signals changes in at least one of the elements mentioned earlier. Also, from
-the data processing step, we know there were significant problems with data
-collected prior to 1996.
-
-However, we can focus on data after 1996 to get the following two plots. The
-first shows the average health impact of each weather event per year after
-1996. From this plot, it appears as though tsunamis, hurricanes, and
-heat/excessive heat have the largest impact on health.
-
-
-```r
-weather.impact =
-    weather.table[ , year := year(bgn_date) ];
-
-weather.impact =
-    weather.impact[
-        year >= 1996,
-        list(
-            injuries = mean(injuries),
-            fatalities = mean(fatalities),
-            totaldmg = mean(totaldmg)
-        ),
-        by = "evtype"
-    ];
-
-weather.impact =
-    melt(
-         weather.impact,
-         c( "evtype", "totaldmg" ),
-         variable.name = "health"
-    );
-
-healthplot =
-    ggplot( weather.impact, aes( x = evtype, y = value, fill = health ) ) +
-    geom_bar( stat = "identity", position = position_dodge() ) +
-    theme(
-        axis.text.x = element_text( angle = -60, hjust = 0 )
-    ) +
-    scale_y_continuous( expand = c(0, 0), limits = c(0, 6.8) ) +
-    ggtitle(
-        "Average Health Impact of Weather Effects Per Year (after 1996)"
-    ) +
-    xlab( "Weather Event Type" ) +
-    ylab( "Number of People" ) +
-    scale_fill_discrete( name = "" );
-
-print( healthplot );
-```
-
-![](figure/weather_health_impact_after_1996-1.png)
-
-Similarly, the following figure shows average economic impact per year after
-1996 for each weather event. From this plot, it appears as though hurricanes
-and storm surges have by far the largest economic impact.
-
-
-```r
-econplot =
-    ggplot( weather.impact, aes( x = evtype, y = totaldmg, fill = evtype ) ) +
-    geom_bar( stat = "identity", show.legend = FALSE ) +
-    theme(
-        axis.text.x = element_text( angle = -60, hjust = 0 )
-    ) +
-    scale_y_continuous( expand = c(0, 0) ) +
-    ggtitle(
-        "Average Economic Impact of Weather Effects Per Year (after 1996)"
-    ) +
-    xlab( "Weather Event Type" ) +
-    ylab( "Damage (in dollars)" ) +
-    scale_fill_discrete( name = "" );
-
-print( econplot );
-```
-
-![](figure/weather_economic_impact_after_1996-1.png)
-
-Future investigation should probably work to resolve issues with the NOAA data
-set in a way that is robust. In addition, focus should be given to
-examining the impact of hurricanes, heat, storm surge (which is related to
-hurricanes), and tsunamis.
-
-***
-***
